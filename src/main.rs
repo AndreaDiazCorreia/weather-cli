@@ -1,143 +1,270 @@
-use std::io; // Importing the standard input/output library for user input
+use std::{env, error::Error};
+use config::{Config, File};
+use serde::Deserialize;
+use colored::*;
+use rustyline::Editor;
 
-use serde::Deserialize; // Importing serde for JSON deserialization
+// Configuration Structures
+#[derive(Deserialize, Debug)]
+struct AppConfig {
+    api_key: String,
+    default_country: String,
+    temperature_unit: String,
+}
 
-use colored::*; // Importing colored crate for text coloring
-
-// Struct to deserialize the JSON response from OpenWeatherMap API
+// Weather API Response Structures - Enhanced from your original version
 #[derive(Deserialize, Debug)]
 struct WeatherResponse {
-    weather: Vec<Weather>, // Contains weather information
-    main: Main, // Contains main weather parameters
-    wind: Wind, // Contains wind information
-    name: String, // Contains the name of the queried location
+    weather: Vec<Weather>,
+    main: Main,
+    wind: Wind,
+    name: String,
+    sys: System,  // Added to get country information
 }
 
-// Struct to represent weather description
 #[derive(Deserialize, Debug)]
 struct Weather {
-    description: String, // Contains textual weather description
+    description: String,
+    main: String,  // Added to get main weather condition
 }
 
-// Struct to represent main weather parameters
 #[derive(Deserialize, Debug)]
 struct Main {
-    temp: f64, // Temperature in Celsius
-    humidity: f64, // Humidity in percentage
-    pressure: f64, // Atmospheric pressure in hPa
+    temp: f64,
+    feels_like: f64,  // Added for better user information
+    humidity: f64,
+    pressure: f64,
+    temp_min: f64,    // Added to show temperature range
+    temp_max: f64,
 }
 
-// Struct to represent wind information
 #[derive(Deserialize, Debug)]
 struct Wind {
-    speed: f64, // Wind speed in meters per second
+    speed: f64,
+    deg: Option<f64>,  // Added wind direction, Optional because it's not always available
 }
 
-// Function to get weather information from OpenWeatherMap API
+#[derive(Deserialize, Debug)]
+struct System {
+    country: String,
+}
+
+// Temperature handling
+#[derive(Debug)]
+enum TemperatureUnit {
+    Celsius,
+    Fahrenheit,
+}
+
+impl TemperatureUnit {
+    fn from_str(s: &str) -> Result<Self, String> {
+        match s.to_lowercase().as_str() {
+            "celsius" | "c" => Ok(TemperatureUnit::Celsius),
+            "fahrenheit" | "f" => Ok(TemperatureUnit::Fahrenheit),
+            _ => Err("Invalid temperature unit".to_string()),
+        }
+    }
+}
+
+// Weather formatting and display
+struct WeatherFormatter {
+    unit: TemperatureUnit,
+}
+
+impl WeatherFormatter {
+    fn new(unit: TemperatureUnit) -> Self {
+        Self { unit }
+    }
+
+    fn format_temperature(&self, celsius: f64) -> f64 {
+        match self.unit {
+            TemperatureUnit::Celsius => celsius,
+            TemperatureUnit::Fahrenheit => (celsius * 9.0/5.0) + 32.0,
+        }
+    }
+
+    fn get_unit_symbol(&self) -> &str {
+        match self.unit {
+            TemperatureUnit::Celsius => "°C",
+            TemperatureUnit::Fahrenheit => "°F",
+        }
+    }
+}
+
+// CLI Interface handling
+struct WeatherCli {
+    editor: Editor<()>,
+    config: AppConfig,
+    formatter: WeatherFormatter,
+}
+
+impl WeatherCli {
+    fn new(config: AppConfig) -> Result<Self, Box<dyn Error>> {
+        let unit = TemperatureUnit::from_str(&config.temperature_unit)
+            .unwrap_or(TemperatureUnit::Celsius);
+        
+        Ok(Self {
+            editor: Editor::<()>::new()?,
+            config,
+            formatter: WeatherFormatter::new(unit),
+        })
+    }
+
+    fn prompt(&mut self, prompt: &str) -> Result<String, Box<dyn Error>> {
+        match self.editor.readline(&format!("{} > ", prompt)) {
+            Ok(line) => {
+                self.editor.add_history_entry(line.as_str());
+                Ok(line)
+            }
+            Err(err) => Err(err.into()),
+        }
+    }
+}
+
+// Configuration loading
+fn load_config() -> Result<AppConfig, Box<dyn Error>> {
+    let config = Config::builder()
+        .add_source(File::with_name("config"))
+        .build()?;
+
+    let app_config = config.try_deserialize::<AppConfig>()?;
+    Ok(app_config)
+}
+
+// Weather API interaction
 fn get_weather_info(city: &str, country_code: &str, api_key: &str) -> Result<WeatherResponse, reqwest::Error> {
-    // Constructing the URL for API request
     let url = format!(
         "http://api.openweathermap.org/data/2.5/weather?q={},{}&units=metric&appid={}",
         city, country_code, api_key
     );
 
-    // Sending a blocking GET request to the API endpoint
     let response = reqwest::blocking::get(&url)?;
-    // Parsing the JSON response into WeatherResponse struct
     let response_json = response.json::<WeatherResponse>()?;
-    Ok(response_json) // Returning the deserialized response
+    Ok(response_json)
 }
 
-// Function to display weather information
-fn display_weather_info(response: &WeatherResponse) {
-    // Extracting weather information from the response
+// Enhanced weather display
+fn display_weather_info(response: &WeatherResponse, formatter: &WeatherFormatter) {
     let description = &response.weather[0].description;
-    let temperature = response.main.temp;
-    let humidity = response.main.humidity;
-    let pressure = response.main.pressure;
-    let wind_speed = response.wind.speed;
+    let temperature = formatter.format_temperature(response.main.temp);
+    let feels_like = formatter.format_temperature(response.main.feels_like);
+    let unit = formatter.get_unit_symbol();
 
-    // Formatting weather information into a string
     let weather_text = format!(
-"Weather in {}: {} {}
-> Temperature: {:.1}°C, 
+        "Weather in {}, {}: {} {}
+> Temperature: {:.1}{} (feels like {:.1}{}),
+> Range: {:.1}{} - {:.1}{},
 > Humidity: {:.1}%, 
-> Pressure: {:.1} hPa, 
-> Wind Speed: {:.1} m/s",
-    response.name,
-    description,
-    get_temperature_emoji(temperature),
-    temperature,
-    humidity,
-    pressure,
-    wind_speed,
-);
+> Pressure: {:.1} hPa,
+> Wind: {:.1} m/s {}",
+        response.name,
+        response.sys.country,
+        description,
+        get_temperature_emoji(response.main.temp),
+        temperature,
+        unit,
+        feels_like,
+        unit,
+        formatter.format_temperature(response.main.temp_min),
+        unit,
+        formatter.format_temperature(response.main.temp_max),
+        unit,
+        response.main.humidity,
+        response.main.pressure,
+        response.wind.speed,
+        get_wind_direction(response.wind.deg),
+    );
 
-    // Coloring the weather text based on weather conditions
-    let weather_text_colored = match description.as_str() {
-        "clear sky" => weather_text.bright_yellow(),
-        "few clouds" | "scattered clouds" | "broken clouds" => weather_text.bright_blue(),
-        "overcast clouds" | "mist" | "haze" | "smoke" | "sand" | "dust" | "fog" | "squalls" => weather_text.dimmed(),
-        "shower rain" | "rain" | "thunderstorm" | "snow" => weather_text.bright_cyan(),
+    let weather_text_colored = match response.weather[0].main.as_str() {
+        "Clear" => weather_text.bright_yellow(),
+        "Clouds" => weather_text.bright_blue(),
+        "Rain" | "Drizzle" | "Snow" => weather_text.bright_cyan(),
+        "Thunderstorm" => weather_text.bright_purple(),
         _ => weather_text.normal(),
     };
 
-    // Printing the colored weather information
     println!("{}", weather_text_colored);
 }
 
-// Function to get emoji based on temperature
+// Enhanced emoji and wind direction helpers
 fn get_temperature_emoji(temperature: f64) -> &'static str {
     if temperature < 0.0 {
         "❄️"
-    } else if temperature >= 0.0 && temperature < 10.0 {
+    } else if temperature < 10.0 {
         "☁️"
-    } else if temperature >= 10.0 && temperature < 20.0 {
+    } else if temperature < 20.0 {
         "⛅"
-    } else if temperature >= 20.0 && temperature < 30.0 {
+    } else if temperature < 30.0 {
         "🌤️"
     } else {
         "🔥"
     }
 }
 
-fn main() {
-    println!("{}", "Welcome to Weather Station!".bright_yellow()); // Displaying welcome message
+fn get_wind_direction(degrees: Option<f64>) -> String {
+    match degrees {
+        Some(deg) => {
+            let directions = ["↑", "↗", "→", "↘", "↓", "↙", "←", "↖"];
+            let index = (((deg + 22.5) % 360.0) / 45.0) as usize;
+            directions[index].to_string()
+        },
+        None => "".to_string(),
+    }
+}
+
+// Enhanced main function
+fn main() -> Result<(), Box<dyn Error>> {
+    println!("{}", "⚡ Welcome to Weather Station! ⚡".bright_yellow());
+
+    // Load configuration with fallback to environment variables
+    let config = match load_config() {
+        Ok(config) => config,
+        Err(_e) => {
+            eprintln!("{}", "Failed to load configuration, using defaults...".yellow());
+            AppConfig {
+                api_key: env::var("WEATHER_API_KEY")
+                    .unwrap_or_else(|_| "YOUR_API_KEY".to_string()),
+                default_country: "US".to_string(),
+                temperature_unit: "celsius".to_string(),
+            }
+        }
+    };
+
+    let mut cli = WeatherCli::new(config)?;
 
     loop {
-        println!("{}", "Please enter the name of the city:".bright_green()); // Prompting user to enter city name
+        let city = match cli.prompt("Enter city name (or 'quit' to exit)") {
+            Ok(city) => city.trim().to_string(),
+            Err(_) => break,
+        };
 
-        let mut city = String::new();
-        io::stdin().read_line(&mut city).expect("Failed to read input"); // Reading user input for city name
-        let city = city.trim();
-
-        println!("{}", "Please enter the country code (e.g., US for United States):".bright_green()); // Prompting user to enter country code
-
-        let mut country_code = String::new();
-        io::stdin().read_line(&mut country_code).expect("Failed to read input"); // Reading user input for country code
-        let country_code = country_code.trim();
-
-        // Get your API key from OpenWeatherMap
-        let api_key = "96a5b0783c0c7ddc0fbf5b944f3a572d"; 
-
-        // Calling the function to fetch weather information
-        match get_weather_info(&city, &country_code, api_key) {
-            Ok(response) => {
-                display_weather_info(&response); // Displaying weather information
-            }
-            Err(err) => {
-                eprintln!("Error: {}", err); // Printing error message in case of failure
-            }
+        if city.eq_ignore_ascii_case("quit") {
+            break;
         }
 
-        println!("{}", "Do you want to search for weather in another city? (yes/no):".bright_green()); // Prompting user to continue or exit
-        let mut input = String::new();
-        io::stdin().read_line(&mut input).expect("Failed to read input"); // Reading user input for continuation
-        let input = input.trim().to_lowercase();
+        let country = match cli.prompt("Enter country code (press Enter for default)") {
+            Ok(country) => {
+                let country = country.trim().to_string();
+                if country.is_empty() {
+                    cli.config.default_country.clone()
+                } else {
+                    country
+                }
+            },
+            Err(_) => break,
+        };
 
-        if input != "yes" {
-            println!("Thank you for using our software!");
-            break; // Exiting the loop if user doesn't want to continue
+        match get_weather_info(&city, &country, &cli.config.api_key) {
+            Ok(response) => {
+                display_weather_info(&response, &cli.formatter);
+            }
+            Err(e) => {
+                eprintln!("{}", format!("Error: {}", e).bright_red());
+                continue;
+            }
         }
     }
+
+    println!("{}", "👋 Thank you for using Weather Station!".bright_yellow());
+    Ok(())
 }
