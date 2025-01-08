@@ -1,4 +1,4 @@
-use std::{env, error::Error};
+use std::{error::Error, path::Path};
 use config::{Config, File};
 use serde::Deserialize;
 use colored::*;
@@ -123,11 +123,31 @@ impl WeatherCli {
 
 // Configuration loading
 fn load_config() -> Result<AppConfig, Box<dyn Error>> {
+    
+    let config_path = Path::new("config.toml");
+    let template_path = Path::new("config.tpl.toml");
+
+    
+    if !config_path.exists() && template_path.exists() {
+        println!("{}", "No se encontró archivo de configuración.".yellow());
+        println!("{}", "Por favor, copia config.tpl.toml a config.toml y añade tu API key.".yellow());
+        return Err("Archivo de configuración no encontrado".into());
+    }
+
+    
     let config = Config::builder()
-        .add_source(File::with_name("config"))
+        // Primero cargamos la plantilla (valores por defecto)
+        .add_source(File::with_name("config.tpl.toml").required(false))
+        // Luego cargamos la configuración real, que sobrescribirá la plantilla
+        .add_source(File::with_name("config.toml").required(false))
         .build()?;
 
-    let app_config = config.try_deserialize::<AppConfig>()?;
+    
+    let app_config: AppConfig = config.try_deserialize()?;
+    if app_config.api_key == "YOUR_API_KEY_HERE" {
+        return Err("Por favor, actualiza la API key en config.toml".into());
+    }
+
     Ok(app_config)
 }
 
@@ -219,14 +239,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Load configuration with fallback to environment variables
     let config = match load_config() {
         Ok(config) => config,
-        Err(_e) => {
-            eprintln!("{}", "Failed to load configuration, using defaults...".yellow());
-            AppConfig {
-                api_key: env::var("WEATHER_API_KEY")
-                    .unwrap_or_else(|_| "YOUR_API_KEY".to_string()),
-                default_country: "US".to_string(),
-                temperature_unit: "celsius".to_string(),
-            }
+        Err(e) => {
+            eprintln!("{}", format!("Error de configuración: {}", e).bright_red());
+            eprintln!("{}", "1. Copia config.tpl.toml a config.toml".bright_yellow());
+            eprintln!("{}", "2. Edita config.toml y añade tu API key".bright_yellow());
+            return Ok(());
         }
     };
 
